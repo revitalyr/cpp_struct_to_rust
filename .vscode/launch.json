@@ -1,0 +1,46 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'clang_index'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=clang_index",
+                    "--package=clang_index"
+                ],
+                "filter": {
+                    "name": "clang_index",
+                    "kind": "bin"
+                }
+            },
+            "args": ["E:/_sources/_os/vbox/src/VBox/Storage/VMDK.cpp"],
+            "cwd": "${workspaceFolder}",
+            "sourceMap": {"/rustc/935dc07218b4bf6e20231e44eb9263b612fd649b" : "C:/Users/vital/.rustup/toolchains/nightly-x86_64-pc-windows-msvc/lib/rustlib/src/rust"}
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'clang'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=clang",
+                    "--package=clang"
+                ],
+                "filter": {
+                    "name": "clang",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
