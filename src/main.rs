@@ -1,10 +1,31 @@
+#![feature(try_blocks)]
+use std::collections::HashSet;
 use std::env;
 use std::fs::File;
 use std::io::Write;
 //use std::process::exit;
 use clang::{Clang, Index, EntityKind, Entity};
+use clang::source::Location;
 //use clib;
 use regex::Regex;
+
+type Dictionary = HashSet<String>;
+
+struct KnownTypes {
+    structs: Dictionary,
+}
+
+impl KnownTypes {
+    fn new() -> Self {
+        KnownTypes {
+            structs: Dictionary::new(),
+        }
+    }
+
+    fn add_struct(&mut self, name: &str) {
+        self.structs.insert(name.to_string());
+    }
+}
 
 struct Field {
     name: String,
@@ -27,40 +48,75 @@ impl StructGen {
     fn add_field(&mut self, fld_name: &str, fld_type: &str) {
         self.members.push(Field {
             name: fld_name.to_string(),
-            type_: c_to_rust_type(fld_type).to_string(),
+            type_: fld_type.to_string(),
         })
     }
 
     fn get_rust_code(&self) -> String {
-        let mut code = format!("struct {} {{\n", self.name);
+        let mut code = format!("#[derive(Debug, Copy, Clone)]\n#[repr(C)]\nstruct {} {{\n", self.name);
         self.members
             .iter()
             .for_each(|fld| {
                 code += format!("  {}: {},\n", fld.name, fld.type_).as_str();
             } );
-        code += "}\n";
+        code += "}\n\n";
         code
     }
 }
 
-fn c_to_rust_type(c_type: &str) -> String {
-    lazy_static::lazy_static! {
+struct Converter<'tu> {
+    known_types: KnownTypes,
+    location: Location<'tu>,
+}
+
+impl<'tu> Converter<'tu> {
+    fn new() -> Self {
+        Converter {
+            known_types: KnownTypes::new(),
+            location: Location {
+                file: None,
+                line: 0,
+                column: 0,
+                offset: 0,
+            },
+        }
+    }
+
+    fn set_location(&mut self, entity: &Entity<'tu>) {
+        self.location = entity.get_location().unwrap().get_spelling_location();
+    }
+
+    fn try_c_to_rust_type(&mut self, c_type: &str) -> Option<String> {
+        lazy_static::lazy_static! {
         static ref RE_ARRAY: Regex = Regex::new(r"([^\[]+)\[([^\]]*)\]").unwrap();
     }
 
-    if let Some(cap) = RE_ARRAY.captures(c_type) {
-        let arr_type = cap.get(1).unwrap().as_str().trim();
-        return format!("[{}; {}]", c_to_rust_type(arr_type), cap.get(2).unwrap().as_str());
+        if let Some(cap) = RE_ARRAY.captures(c_type) {
+            let arr_type = cap.get(1).unwrap().as_str().trim();
+            return Some(format!("[{}; {}]", self.c_to_rust_type(arr_type), cap.get(2).unwrap().as_str()));
+        }
+
+        Some(match c_type {
+            "int" => "c_int",
+            "bool" => "bool",
+            "char" => "c_char",
+            "const char *" => "CStr",
+            "unsigned int" => "c_uint",
+            _ => return None,
+        }.to_string())
     }
 
-    match c_type {
-        "int" => "c_int",
-        "bool" => "bool",
-        "char" => "c_char",
-        "const char *" => "CStr",
-        "unsigned int" => "c_uint",
-        _ => panic!("missed '{c_type}'"),
-    }.to_string()
+    fn c_to_rust_type(&mut self, c_type: &str) -> String {
+        if let Some(s) = self.try_c_to_rust_type(c_type) {
+            return s;
+        }
+        eprintln!("\x1B[31mmissed '{c_type}' line: {}, column: {}\x1b[0m", self.location.line, self.location.column);
+        format!("!!!{c_type}!!!")
+    }
+
+    fn add_struct(&mut self, name: &str) {
+        self.known_types.add_struct(name);
+    }
 }
 
 fn get_name(ent: &Entity) -> String {
@@ -98,29 +154,33 @@ fn main () {
 ".to_string();
 
     let mut output = File::create("./misc/src/lib.rs").unwrap();
+    let mut converter = Converter::new();
 
     for child in entity.get_children() {
         match child.get_kind()  {
             EntityKind::StructDecl => {
+                converter.set_location(&child);
                 let name = get_name(&child);
                 let mut  str_def = StructGen::new(&name);
                 //println!("  StructDecl {}: ", name);
 
                 for field in child.get_children() {
+                    converter.set_location(&field);
                     let fld_name = get_name(&field);
                     let fld_type = get_type(&field);
 
-                    str_def.add_field(&fld_name, &fld_type);
+                    str_def.add_field(&fld_name, &converter.c_to_rust_type(&fld_type));
                     //println!("    {}: {}", fld_name, fld_type);
                 }
                 let def = str_def.get_rust_code();
                 //println!("{}", def);
                 rust_code += &def;
-                println!("{rust_code}");
+                converter.add_struct(&name);
+                //println!("{rust_code}");
                 // exit(0);
             },
             _ => {
-                //println!("  {child:?}");
+                println!("  {child:?}");
             },
         }
     }
