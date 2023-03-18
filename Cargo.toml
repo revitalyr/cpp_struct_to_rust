@@ -7,3 +7,5 @@ edition = "2021"
 
 [dependencies]
 clang = "2.0.0"
+regex = "1.7.1"
+lazy_static = "1.4.0"
