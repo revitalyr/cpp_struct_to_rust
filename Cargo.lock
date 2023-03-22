@@ -32,7 +32,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "clang_index"
+name = "cpp_struct_to_rust"
 version = "0.1.0"
 dependencies = [
  "clang",
