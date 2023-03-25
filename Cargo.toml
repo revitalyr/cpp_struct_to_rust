@@ -9,3 +9,5 @@ edition = "2021"
 clang = {version = "2.0.0", features=["clang_6_0"]}
 regex = "1.7.1"
 lazy_static = "1.4.0"
+dunce = "1.0.3"
+clap = { version = "4.1.7", features = ["derive"] }
