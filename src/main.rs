@@ -1,18 +1,31 @@
 #![feature(try_blocks)]
 
-use std::collections::{HashMap, HashSet};
-use std::{env, path};
-use std::fmt::{Debug, Formatter};
-use std::fs::File;
-use std::io::Write;
-use std::path::PathBuf;
+use std::{  collections::{HashMap, HashSet},
+            path,
+            fmt::{Debug, Formatter},
+            fs::{self, File},
+            io::Write,
+            path::PathBuf};
 
 //use std::process::exit;
 use clang::{Clang, Entity, EntityKind, Index, TypeKind};
 use clang::source::Location;
 
-//use clib;
+use dunce;
 use regex::Regex;
+use clap::Parser;
+
+#[derive(Parser)]
+struct Cli {
+    /// Path to source
+    cpp_path: String,
+    /// Path to result
+    #[arg(short, long, value_name = "RESULT RUST FILE")]
+    rs_path: Option<String>,
+    /// Clang args
+    #[arg(short, long, value_name = "CLANG's ARGUMENTS")]
+    clang_args: Option<String>,
+}
 
 struct Field {
     name: String,
@@ -40,11 +53,11 @@ impl StructGen {
     }
 
     fn get_rust_code(&self) -> String {
-        let mut code = format!("\n/*#[derive(Debug, Copy, Clone)]*/\n#[repr(C)]\nstruct {} {{\n", self.name);
+        let mut code = format!("\n#[derive(Debug, Clone)]\n#[repr(C)]\npub struct {} {{\n", self.name);
         self.members
             .iter()
             .for_each(|fld| {
-                code += format!("  {}: {},\n", fld.name, fld.type_).as_str();
+                code += format!("  pub {}: {},\n", fld.name, fld.type_).as_str();
             });
         code += "}\n";
         code
@@ -155,13 +168,13 @@ impl<'tu> Converter<'tu> {
             "int" => "c_int",
             "bool" => "bool",
             "char" => "c_char",
-            "const char *" => "Box<CStr>",
+            "const char *" => "*const c_char",
             "unsigned int" => "c_uint",
             "size_t" => "usize",
-            "int *" => "*const c_int",
+            "int *" => "Vec<c_int>",
             "char *" => "*const c_char",
             "char **" => "*const *const c_char",
-            "void *" => "c_void",
+            "void *" => "*const c_void",
             _ => return None,
         }.to_string())
     }
@@ -208,7 +221,11 @@ impl<'tu> Converter<'tu> {
 }
 
 fn get_name(ent: &Entity) -> String {
-    ent.get_display_name().unwrap().clone()
+    if let Some(ref name) = ent.get_display_name() {
+        name.clone()
+    } else {
+        "NONE".to_string()
+    }
 }
 
 fn get_type(ent: &Entity) -> String {
@@ -216,14 +233,15 @@ fn get_type(ent: &Entity) -> String {
 }
 
 fn main() {
-    let arg = env::args().skip(1).next().unwrap().as_str().to_string();
-    let cpp_file = path::Path::new(&arg);
+    let cli = Cli::parse();
+
+    let cpp_file = path::Path::new(&cli.cpp_path);
     println!("cpp_file: '{}'", cpp_file.display());
     let clang = Clang::new().unwrap();
-    let index = Index::new(&clang, false, false);
-    let arguments = vec!["-I", "dummy"];
+    let index = Index::new(&clang, false, true);
+    let arguments = if let Some(args) = cli.clang_args{ args } else { "".to_string() };
     let mut parser = index.parser(cpp_file);
-    let parser = parser.arguments(&arguments);
+    let parser = parser.arguments(&[arguments.trim_matches(|c| c == '"')]);
     let tu = match parser.parse() {
         Ok(tu) => tu,
         Err(e) => panic!("Parse error: {e}"),
@@ -235,17 +253,30 @@ fn main() {
     let mut rust_code =
         r"
 #![allow(dead_code, non_snake_case, non_camel_case_types)]
-use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
+use std::ffi::{c_char, c_int, c_uint, c_void};
 
 fn main () {
 }
 
 ".to_string();
 
-    let mut outfile = PathBuf::from(cpp_file.file_name().unwrap().to_str().unwrap());
-    outfile.set_extension("rs");
-    println!("rust_file: '{}'", outfile.canonicalize().unwrap().display());
-    let mut output = File::create(outfile).unwrap();
+    let mut outfile = if let Some(rs_path) = cli.rs_path { 
+        PathBuf::from(&rs_path)
+    } else {
+        PathBuf::from(cpp_file.file_name().unwrap().to_str().unwrap())
+    };
+    if outfile.extension().unwrap().to_str() == Some("cpp") {
+        outfile.set_extension("rs");
+    };
+    if outfile.exists() {
+      let mut backup = PathBuf::from(&outfile);
+      backup.set_extension("bak");
+      fs::rename(&outfile, &backup).unwrap();
+    }
+
+    let mut output = File::create(&outfile).unwrap();
+    println!("rust_file: '{}'", dunce::simplified(outfile.canonicalize().unwrap().as_path()).display());
+
     let mut converter = Converter::new();
 
     for child in entity.get_children() {
@@ -262,6 +293,7 @@ fn main () {
                         let fld_name = get_name(&field);
                         let fld_type = get_type(&field);
 
+                        //println!("{fld_type} {fld_name}");
                         str_def.add_field(&fld_name, &converter.c_to_rust_type(&fld_type));
                     }
                     let def = str_def.get_rust_code();
@@ -293,11 +325,11 @@ fn main () {
                 for val in child.get_children() {
                     values.push(get_name(&val));
                 }
-                rust_code += &format!("enum {name} {{\n    {}\n}}", values.join(",\n    "));
+                rust_code += &format!("#[derive(Debug, PartialEq, Clone)]\npub enum {name} {{\n    {}\n}}\n", values.join(",\n    "));
                 converter.add_enum(&name, values);
             }
             _ => {
-                //println!("  {child:?}");
+                println!("  {child:?}");
             }
         }
     }
