@@ -192,22 +192,36 @@ impl<'tu> Converter<'tu> {
 
     fn try_c_to_rust_type(&self, c_type: &str) -> Option<String> {
         let text = match c_type {
-                                        "int" => "c_int",
-                                        "bool" => "bool",
-                                        "char" => "c_char",
-                                        "const char *" => "*const c_char",
-                                        "unsigned char" => "c_uchar",
-                                        "unsigned short" => "c_ushort",
-                                        "unsigned int" => "c_uint",
-                                        "unsigned long long" => "c_longlong",
-                                        "size_t" => "usize",
-                                        "int *" => "Vec<c_int>",
-                                        "char *" => "*const c_char",
-                                        "char **" => "*const *const c_char",
-                                        "void *" => "*const c_void",
-                                        "uintptr_t" => "*const c_void",
-                                        _ => "",
-                                    };
+            "int" => "i32",
+            "bool" => "bool",
+            "char" => "i8",
+            "const char *" => "*const i8",
+            "unsigned char" => "u8",
+            "unsigned short" => "u16",
+            "unsigned int" => "u32",
+            "unsigned long long" => "i64",
+            "size_t" => "usize",
+            "SIZE_T" => "usize",
+            "ssize_t" => "i32",
+            "int *" => "Vec<i32>",
+            "uint32_t *" => "Vec<u32>",
+            "char *" => "*const i8",
+            "char **" => "*const *const i8",
+            "void *" => "*const ()",
+            "uintptr_t" => "*const ()",
+            "PVOID" => "*const ()",
+            "BYTE" => "u8",
+            "WCHAR" => "u16",
+            "INT" => "i32",
+            "UINT" => "u32",
+            "USHORT" => "u16",
+            "UINT32" => "u32",
+            "UINT64" => "u64",
+            "ULONG" => "u32",
+            "DWORD" => "u32",
+            "DWORD32" => "u32",
+            _ => "",
+        };
         if !text.is_empty() {
             return Some(text.to_string());
         }
@@ -377,7 +391,6 @@ fn main() {
     let header =
         r"
         #![allow(dead_code, non_snake_case, non_camel_case_types, unused_imports)]
-        use std::ffi::{c_char, c_uchar, c_int, c_longlong, c_uint, c_ushort, c_void};
 
         fn main () {
         }
@@ -392,20 +405,7 @@ fn main() {
         rust_code += "\n";
     }
 
-    //let source_file = cpp_file.to_str().unwrap();
-    let mut chief_name = cpp_file.file_name().unwrap().to_str().unwrap();
-    if chief_name.ends_with("_wrapper.cpp") {
-        chief_name = chief_name.strip_suffix("_wrapper.cpp").unwrap();
-    }
-    let source_file = if let Some((_, def)) = converter.known_types.structs
-                                                                .iter()
-                                                                .find(
-                                                                    |(_, def)|
-                                                                        def.source_file.ends_with(chief_name)) {
-        &def.source_file
-    } else {
-        cpp_file.to_str().unwrap()
-    };
+    let source_file = cpp_file.to_str().unwrap();
     let mut used_types = NamesSet::new();
 
     for (_, str_def) in &converter.known_types.structs {
