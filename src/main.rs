@@ -34,17 +34,25 @@ struct Field {
     type_: String,
 }
 
-#[derive(Debug)]
 struct StructDef {
     name: String,
     members: Vec<Field>,
+    source_file: String,
+}
+
+impl Debug for StructDef {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let fields = self.members.iter().map(|f| format!("    {}: {}", f.name, f.type_)).collect::<Vec<String>>().join("\n");
+        write!(f, "\n{fields}\n\n",)
+    }
 }
 
 impl StructDef {
-    fn new(name: &str) -> Self {
+    fn new(name: &str, source: &str) -> Self {
         StructDef {
             name: name.to_string(),
             members: vec![],
+            source_file: source.to_string(),
         }
     }
 
@@ -56,9 +64,18 @@ impl StructDef {
     }
 
     fn get_used_types(&self) -> NamesSet {
+        lazy_static::lazy_static! {
+            static ref RE_ARRAY: Regex = Regex::new(r"\[([^;]+);").unwrap();
+        }
+
         let mut result = NamesSet::with_capacity(self.members.len());
         for fld in &self.members {
-            result.insert(fld.type_.clone());
+            if let Some(cap) = RE_ARRAY.captures(&fld.type_) {
+                let type_ = cap.get(1).unwrap().as_str().trim();
+                result.insert(type_.to_string());
+            } else {
+                result.insert(fld.type_.clone());
+            }
         }
 
         result
@@ -95,12 +112,14 @@ enum KnownType {
     Struct,
     TypeDef,
     Enum,
+    Unknown,
 }
 
 struct KnownTypes {
     structs: StructDefDict,
     typedefs: TypeDefDict,
     enums: EnumDefDict,
+    unknown: NamesSet,
 }
 
 impl KnownTypes {
@@ -109,6 +128,7 @@ impl KnownTypes {
             structs: StructDefDict::new(),
             typedefs: TypeDefDict::new(),
             enums: EnumDefDict::new(),
+            unknown: NamesSet::new(),
         }
     }
 
@@ -121,6 +141,9 @@ impl KnownTypes {
         }
         if self.enums.contains_key(name) {
             return KnownType::Enum;
+        }
+        if self.unknown.contains(name) {
+            return KnownType::Unknown;
         }
 
         KnownType::None
@@ -173,8 +196,10 @@ impl<'tu> Converter<'tu> {
                                         "bool" => "bool",
                                         "char" => "c_char",
                                         "const char *" => "*const c_char",
+                                        "unsigned char" => "c_uchar",
                                         "unsigned short" => "c_ushort",
                                         "unsigned int" => "c_uint",
+                                        "unsigned long long" => "c_longlong",
                                         "size_t" => "usize",
                                         "int *" => "Vec<c_int>",
                                         "char *" => "*const c_char",
@@ -194,6 +219,8 @@ impl<'tu> Converter<'tu> {
                 return Some(c_type.to_string()),
             KnownType::Enum =>
                 return Some(c_type.to_string()),
+            KnownType::Unknown =>
+                return Some(format!("!!!{c_type}!!!")),
             KnownType::None =>
                 return None,
         }
@@ -224,7 +251,8 @@ impl<'tu> Converter<'tu> {
 
         eprintln!("\x1B[31mmissed '{c_type}' line: {}, column: {} in {}\x1b[0m",
                   self.location.line, self.location.column, self.location.file.unwrap().get_path().display());
-        format!("!!!{c_type}!!!")
+        self.known_types.unknown.insert(c_type.to_string());
+        self.try_c_to_rust_type(c_type).unwrap()
     }
 
     fn add_struct(&mut self, str_def: StructDef) {
@@ -259,14 +287,13 @@ fn get_type(ent: &Entity) -> String {
 fn main() {
     let cli = Cli::parse();
 
-    let cpp_file = path::Path::new(&cli.cpp_path);
+    println!("cpp_path: '{}'", cli.cpp_path);
+    let cpp_file = path::Path::new(&cli.cpp_path).canonicalize().unwrap();
     println!("cpp_file: '{}'", cpp_file.display());
     let clang = Clang::new().unwrap();
     let index = Index::new(&clang, false, true);
-    //let arguments = if let Some(args) = cli.clang_args{ args } else { Vec::new() };
     let arguments = cli.clang_args;
-    let mut parser = index.parser(cpp_file);
-    //let parser = parser.arguments(&[arguments.trim_matches(|c| c == '"' || c == '\'')]);
+    let mut parser = index.parser(&cpp_file);
     let parser = parser.arguments(&arguments);
     let tu = match parser.parse() {
         Ok(tu) => tu,
@@ -284,7 +311,7 @@ fn main() {
                 if child.get_children().len() > 0 {
                     converter.set_location(&child);
                     let name = get_name(&child);
-                    let mut str_def = StructDef::new(&name);
+                    let mut str_def = StructDef::new(&name, converter.location.file.unwrap().get_path().to_str().unwrap());
 
                     //println!("StructDecl: {name}");
                     for field in child.get_children() {
@@ -332,7 +359,7 @@ fn main() {
     let mut outfile = if let Some(rs_path) = cli.rs_path {
         PathBuf::from(&rs_path)
     } else {
-        PathBuf::from(cpp_file.file_name().unwrap().to_str().unwrap())
+        PathBuf::from(&cpp_file)
     };
     if outfile.extension().unwrap().to_str() == Some("cpp") {
         outfile.set_extension("rs");
@@ -349,8 +376,8 @@ fn main() {
     //println!("\nknown_types:{:?}", converter.known_types);
     let header =
         r"
-        #![allow(dead_code, non_snake_case, non_camel_case_types)]
-        use std::ffi::{c_char, c_int, c_uint, c_ushort, c_void};
+        #![allow(dead_code, non_snake_case, non_camel_case_types, unused_imports)]
+        use std::ffi::{c_char, c_uchar, c_int, c_longlong, c_uint, c_ushort, c_void};
 
         fn main () {
         }
@@ -365,12 +392,30 @@ fn main() {
         rust_code += "\n";
     }
 
+    //let source_file = cpp_file.to_str().unwrap();
+    let mut chief_name = cpp_file.file_name().unwrap().to_str().unwrap();
+    if chief_name.ends_with("_wrapper.cpp") {
+        chief_name = chief_name.strip_suffix("_wrapper.cpp").unwrap();
+    }
+    let source_file = if let Some((_, def)) = converter.known_types.structs
+                                                                .iter()
+                                                                .find(
+                                                                    |(_, def)|
+                                                                        def.source_file.ends_with(chief_name)) {
+        &def.source_file
+    } else {
+        cpp_file.to_str().unwrap()
+    };
     let mut used_types = NamesSet::new();
 
     for (_, str_def) in &converter.known_types.structs {
-        let def = str_def.get_rust_code();
-        rust_code += &def;
-        used_types.extend(str_def.get_used_types());
+        //println!("{} {}", str_def.name, str_def.source_file);
+        if str_def.source_file == source_file {
+            let def = str_def.get_rust_code();
+            //println!("{def}");
+            rust_code += &def;
+            used_types.extend(str_def.get_used_types());
+        }
     }
 
     for (name, values) in &converter.known_types.enums {
@@ -394,4 +439,7 @@ fn main() {
     }
 
     write!(output, "{rust_code}").unwrap();
+
+    let mut dump_types = File::create("types.dmp").unwrap();
+    write!(dump_types, "{:?}", converter.known_types).unwrap();
 }
