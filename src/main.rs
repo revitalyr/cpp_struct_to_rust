@@ -16,6 +16,7 @@ use regex::Regex;
 use clap::Parser;
 
 #[derive(Parser)]
+#[clap(ignore_errors=true)]
 struct Cli {
     /// Path to source
     cpp_path: String,
@@ -23,23 +24,25 @@ struct Cli {
     #[arg(short, long, value_name = "RESULT RUST FILE")]
     rs_path: Option<String>,
     /// Clang args
-    #[arg(short, long, value_name = "CLANG's ARGUMENTS")]
-    clang_args: Option<String>,
+    #[arg(last = true, value_name = "CLANG's ARGUMENTS")]
+    clang_args: Vec<String>,
 }
 
+#[derive(Debug)]
 struct Field {
     name: String,
     type_: String,
 }
 
-struct StructGen {
+#[derive(Debug)]
+struct StructDef {
     name: String,
     members: Vec<Field>,
 }
 
-impl StructGen {
+impl StructDef {
     fn new(name: &str) -> Self {
-        StructGen {
+        StructDef {
             name: name.to_string(),
             members: vec![],
         }
@@ -50,6 +53,15 @@ impl StructGen {
             name: fld_name.to_string(),
             type_: fld_type.to_string(),
         })
+    }
+
+    fn get_used_types(&self) -> NamesSet {
+        let mut result = NamesSet::with_capacity(self.members.len());
+        for fld in &self.members {
+            result.insert(fld.type_.clone());
+        }
+
+        result
     }
 
     fn get_rust_code(&self) -> String {
@@ -67,12 +79,13 @@ impl StructGen {
 #[derive(Debug)]
 struct TypeDef {
     name: String,
-    kind: TypeKind,
+    _kind: TypeKind,
     def: String,
 }
 
-type StrSet = HashSet<String>;
+type NamesSet = HashSet<String>;
 type Dictionary<T> = HashMap<String, T>;
+type StructDefDict = Dictionary<StructDef>;
 type TypeDefDict = Dictionary<TypeDef>;
 type EnumDefDict = Dictionary<Vec<String>>;
 
@@ -85,7 +98,7 @@ enum KnownType {
 }
 
 struct KnownTypes {
-    structs: StrSet,
+    structs: StructDefDict,
     typedefs: TypeDefDict,
     enums: EnumDefDict,
 }
@@ -93,14 +106,14 @@ struct KnownTypes {
 impl KnownTypes {
     fn new() -> Self {
         KnownTypes {
-            structs: StrSet::new(),
+            structs: StructDefDict::new(),
             typedefs: TypeDefDict::new(),
             enums: EnumDefDict::new(),
         }
     }
 
     fn is_know_type(&self, name: &str) -> KnownType {
-        if self.structs.contains(name) {
+        if self.structs.contains_key(name) {
             return KnownType::Struct;
         }
         if self.typedefs.contains_key(name) {
@@ -113,8 +126,8 @@ impl KnownTypes {
         KnownType::None
     }
 
-    fn add_struct(&mut self, name: &str) {
-        self.structs.insert(name.to_string());
+    fn add_struct(&mut self, str_def: StructDef) {
+        self.structs.insert(str_def.name.clone(), str_def);
     }
 
     fn add_typedef(&mut self, td: TypeDef) {
@@ -154,44 +167,41 @@ impl<'tu> Converter<'tu> {
         self.location = entity.get_location().unwrap().get_spelling_location();
     }
 
-    fn try_c_to_rust_type(&mut self, c_type: &str) -> Option<String> {
-        lazy_static::lazy_static! {
-            static ref RE_ARRAY: Regex = Regex::new(r"([^\[]+)\[([^\]]*)\]").unwrap();
+    fn try_c_to_rust_type(&self, c_type: &str) -> Option<String> {
+        let text = match c_type {
+                                        "int" => "c_int",
+                                        "bool" => "bool",
+                                        "char" => "c_char",
+                                        "const char *" => "*const c_char",
+                                        "unsigned short" => "c_ushort",
+                                        "unsigned int" => "c_uint",
+                                        "size_t" => "usize",
+                                        "int *" => "Vec<c_int>",
+                                        "char *" => "*const c_char",
+                                        "char **" => "*const *const c_char",
+                                        "void *" => "*const c_void",
+                                        "uintptr_t" => "*const c_void",
+                                        _ => "",
+                                    };
+        if !text.is_empty() {
+            return Some(text.to_string());
         }
 
-        if let Some(cap) = RE_ARRAY.captures(c_type) {
-            let arr_type = cap.get(1).unwrap().as_str().trim();
-            return Some(format!("[{}; {}]", self.c_to_rust_type(arr_type), cap.get(2).unwrap().as_str()));
+        match self.known_types.is_know_type(c_type) {
+            KnownType::Struct =>
+                return Some(c_type.to_string()),
+            KnownType::TypeDef =>
+                return Some(c_type.to_string()),
+            KnownType::Enum =>
+                return Some(c_type.to_string()),
+            KnownType::None =>
+                return None,
         }
-
-        Some(match c_type {
-            "int" => "c_int",
-            "bool" => "bool",
-            "char" => "c_char",
-            "const char *" => "*const c_char",
-            "unsigned int" => "c_uint",
-            "size_t" => "usize",
-            "int *" => "Vec<c_int>",
-            "char *" => "*const c_char",
-            "char **" => "*const *const c_char",
-            "void *" => "*const c_void",
-            _ => return None,
-        }.to_string())
     }
 
     fn c_to_rust_type(&mut self, c_type: &str) -> String {
         if let Some(s) = self.try_c_to_rust_type(c_type) {
             return s;
-        }
-
-        match self.known_types.is_know_type(c_type) {
-            KnownType::Struct =>
-                return c_type.to_string(),
-            KnownType::TypeDef =>
-                return c_type.to_string(),
-            KnownType::Enum =>
-                return c_type.to_string(),
-            KnownType::None => {},
         }
 
         lazy_static::lazy_static! {
@@ -203,12 +213,22 @@ impl<'tu> Converter<'tu> {
             return format!("*const {struct_name}");
         }
 
-        eprintln!("\x1B[31mmissed '{c_type}' line: {}, column: {}\x1b[0m", self.location.line, self.location.column);
+        lazy_static::lazy_static! {
+            static ref RE_ARRAY: Regex = Regex::new(r"([^\[]+)\[([^\]]*)\]").unwrap();
+        }
+
+        if let Some(cap) = RE_ARRAY.captures(c_type) {
+            let arr_type = cap.get(1).unwrap().as_str().trim();
+            return format!("[{}; {}]", self.c_to_rust_type(arr_type), cap.get(2).unwrap().as_str());
+        }
+
+        eprintln!("\x1B[31mmissed '{c_type}' line: {}, column: {} in {}\x1b[0m",
+                  self.location.line, self.location.column, self.location.file.unwrap().get_path().display());
         format!("!!!{c_type}!!!")
     }
 
-    fn add_struct(&mut self, name: &str) {
-        self.known_types.add_struct(name);
+    fn add_struct(&mut self, str_def: StructDef) {
+        self.known_types.add_struct(str_def);
     }
 
     fn add_typedef(&mut self, td: TypeDef) {
@@ -229,7 +249,11 @@ fn get_name(ent: &Entity) -> String {
 }
 
 fn get_type(ent: &Entity) -> String {
-    ent.get_type().unwrap().get_display_name().clone()
+    if let Some(ref type_) = ent.get_type() {
+        type_.get_display_name().clone()
+    } else {
+        "NONE".to_string()
+    }
 }
 
 fn main() {
@@ -239,9 +263,11 @@ fn main() {
     println!("cpp_file: '{}'", cpp_file.display());
     let clang = Clang::new().unwrap();
     let index = Index::new(&clang, false, true);
-    let arguments = if let Some(args) = cli.clang_args{ args } else { "".to_string() };
+    //let arguments = if let Some(args) = cli.clang_args{ args } else { Vec::new() };
+    let arguments = cli.clang_args;
     let mut parser = index.parser(cpp_file);
-    let parser = parser.arguments(&[arguments.trim_matches(|c| c == '"')]);
+    //let parser = parser.arguments(&[arguments.trim_matches(|c| c == '"' || c == '\'')]);
+    let parser = parser.arguments(&arguments);
     let tu = match parser.parse() {
         Ok(tu) => tu,
         Err(e) => panic!("Parse error: {e}"),
@@ -249,33 +275,6 @@ fn main() {
 
     let entity = tu.get_entity();
     //println!("{entity:?}");
-
-    let mut rust_code =
-        r"
-#![allow(dead_code, non_snake_case, non_camel_case_types)]
-use std::ffi::{c_char, c_int, c_uint, c_void};
-
-fn main () {
-}
-
-".to_string();
-
-    let mut outfile = if let Some(rs_path) = cli.rs_path { 
-        PathBuf::from(&rs_path)
-    } else {
-        PathBuf::from(cpp_file.file_name().unwrap().to_str().unwrap())
-    };
-    if outfile.extension().unwrap().to_str() == Some("cpp") {
-        outfile.set_extension("rs");
-    };
-    if outfile.exists() {
-      let mut backup = PathBuf::from(&outfile);
-      backup.set_extension("bak");
-      fs::rename(&outfile, &backup).unwrap();
-    }
-
-    let mut output = File::create(&outfile).unwrap();
-    println!("rust_file: '{}'", dunce::simplified(outfile.canonicalize().unwrap().as_path()).display());
 
     let mut converter = Converter::new();
 
@@ -285,7 +284,7 @@ fn main () {
                 if child.get_children().len() > 0 {
                     converter.set_location(&child);
                     let name = get_name(&child);
-                    let mut str_def = StructGen::new(&name);
+                    let mut str_def = StructDef::new(&name);
 
                     //println!("StructDecl: {name}");
                     for field in child.get_children() {
@@ -296,9 +295,7 @@ fn main () {
                         //println!("{fld_type} {fld_name}");
                         str_def.add_field(&fld_name, &converter.c_to_rust_type(&fld_type));
                     }
-                    let def = str_def.get_rust_code();
-                    rust_code += &def;
-                    converter.add_struct(&name);
+                    converter.add_struct(str_def);
                 }
             }
             EntityKind::TypedefDecl => {
@@ -312,8 +309,7 @@ fn main () {
                         if def_text.ends_with("*") {
                             def_text = format!("*const {}", def_text.trim_end_matches(|c| c=='*'));
                         }
-                        rust_code += &format!("type {} = {};\n", name, def_text);
-                        converter.add_typedef(TypeDef{name: name, kind: td_type.get_kind(), def: def_text });
+                        converter.add_typedef(TypeDef{name: name, _kind: td_type.get_kind(), def: def_text });
                     }
                 }
             }
@@ -325,15 +321,77 @@ fn main () {
                 for val in child.get_children() {
                     values.push(get_name(&val));
                 }
-                rust_code += &format!("#[derive(Debug, PartialEq, Clone)]\npub enum {name} {{\n    {}\n}}\n", values.join(",\n    "));
                 converter.add_enum(&name, values);
             }
             _ => {
-                println!("  {child:?}");
+                //println!("  {child:?}");
             }
         }
     }
 
+    let mut outfile = if let Some(rs_path) = cli.rs_path {
+        PathBuf::from(&rs_path)
+    } else {
+        PathBuf::from(cpp_file.file_name().unwrap().to_str().unwrap())
+    };
+    if outfile.extension().unwrap().to_str() == Some("cpp") {
+        outfile.set_extension("rs");
+    };
+    if outfile.exists() {
+        let mut backup = PathBuf::from(&outfile);
+        backup.set_extension("bak");
+        fs::rename(&outfile, &backup).unwrap();
+    }
+
+    let mut output = File::create(&outfile).unwrap();
+    println!("rust_file: '{}'", dunce::simplified(outfile.canonicalize().unwrap().as_path()).display());
+
     //println!("\nknown_types:{:?}", converter.known_types);
+    let header =
+        r"
+        #![allow(dead_code, non_snake_case, non_camel_case_types)]
+        use std::ffi::{c_char, c_int, c_uint, c_ushort, c_void};
+
+        fn main () {
+        }
+
+        ";
+
+    let mut rust_code = "".to_string();
+
+    for line in header.lines() {
+        let s = line.trim_start();
+        rust_code += s;
+        rust_code += "\n";
+    }
+
+    let mut used_types = NamesSet::new();
+
+    for (_, str_def) in &converter.known_types.structs {
+        let def = str_def.get_rust_code();
+        rust_code += &def;
+        used_types.extend(str_def.get_used_types());
+    }
+
+    for (name, values) in &converter.known_types.enums {
+        if used_types.contains(name) {
+            rust_code += &format!("#[derive(Debug, PartialEq, Clone)]\npub enum {name} {{\n    {}\n}}\n", values.join(",\n    "));
+        }
+    }
+
+    let mut refered_types = NamesSet::new();
+    for (name, def) in &converter.known_types.typedefs {
+        if used_types.contains(name) {
+            let def_text = if let Some(text) = def.def.strip_prefix("*const ") { text.to_string() } else { def.def.clone() };
+            let fld_type = if let Some(rust_type) = converter.try_c_to_rust_type(&def_text) {
+                rust_type
+            } else {
+                format!("!!!{def_text}!!!")
+            };
+            rust_code += &format!("type {} = {};\n", name, fld_type);
+            refered_types.insert(def_text.to_string());
+        }
+    }
+
     write!(output, "{rust_code}").unwrap();
 }
