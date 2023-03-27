@@ -81,12 +81,18 @@ impl StructDef {
         result
     }
 
-    fn get_rust_code(&self) -> String {
+    fn get_rust_code<F: Fn(&String) -> Option<String>>(&self, c_2_rust: F) -> String
+    {
         let mut code = format!("\n#[derive(Debug, Clone)]\n#[repr(C)]\npub struct {} {{\n", self.name);
         self.members
             .iter()
             .for_each(|fld| {
-                code += format!("  pub {}: {},\n", fld.name, fld.type_).as_str();
+                let fld_type = if let Some(fld_type) = c_2_rust(&fld.type_) {
+                    fld_type
+                } else {
+                    format!("??? {} ???", fld.type_)
+                };
+                code += format!("  pub {}: {},\n", fld.name, fld_type).as_str();
             });
         code += "}\n";
         code
@@ -334,7 +340,7 @@ fn main() {
                         let fld_type = get_type(&field);
 
                         //println!("{fld_type} {fld_name}");
-                        str_def.add_field(&fld_name, &converter.c_to_rust_type(&fld_type));
+                        str_def.add_field(&fld_name, &fld_type);
                     }
                     converter.add_struct(str_def);
                 }
@@ -411,7 +417,7 @@ fn main() {
     for (_, str_def) in &converter.known_types.structs {
         //println!("{} {}", str_def.name, str_def.source_file);
         if str_def.source_file == source_file {
-            let def = str_def.get_rust_code();
+            let def = str_def.get_rust_code(|c_type| converter.try_c_to_rust_type(c_type));
             //println!("{def}");
             rust_code += &def;
             used_types.extend(str_def.get_used_types());
